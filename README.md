@@ -126,8 +126,30 @@ The following input-validation measures were applied after code review and penet
 
 ## CI/CD
 
-The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request to `main`:
+Two GitHub Actions workflows automate testing and releasing.
 
-1. Restore, build (Release), and check for vulnerable NuGet packages
-2. Run 140 unit tests with code-coverage collection
-3. On `main` merges: publish, create ZIP artifact, and upload for deployment
+### Test Workflow (`.github/workflows/test.yml`)
+
+Triggers on every push and pull request to `main`/`master`, plus manual dispatch.
+
+1. Restore dependencies and run all unit tests in Release configuration
+2. Collect code coverage via `XPlat Code Coverage`
+3. Generate a coverage summary badge and markdown report (posted to the GitHub Actions job summary)
+
+### Release Workflow (`.github/workflows/release.yml`)
+
+Triggers when a version tag matching `v*.*.*` is pushed (e.g., `v1.0.0`, `v2.1.0-beta`).
+
+1. Run the full test suite as a gate -- packaging only proceeds if tests pass
+2. Publish the project (`dotnet publish -c Release -r linux-x64 --self-contained false`)
+3. Create a versioned ZIP named `NodaMoney_<tag>.zip`
+4. Create a GitHub Release with the ZIP attached and auto-generated release notes
+
+### Creating a Release
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+This triggers the release workflow, which runs tests, builds the ODC-ready ZIP, and publishes a GitHub Release. Download the ZIP from the release page and upload it in **ODC Portal > External Libraries**.
