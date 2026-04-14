@@ -44,6 +44,20 @@ namespace OutSystems.Extension.NodaMoney
         /// </summary>
         /// <param name="money">The NodaMoney.Money instance to convert.</param>
         /// <returns>A MoneyResult with amount, currency code, and formatted string.</returns>
+        /// <summary>
+        /// Parses a money string using a specific culture to resolve ambiguous currency symbols.
+        /// NodaMoney's Money.Parse ignores the culture for currency symbol resolution, so this method
+        /// manually extracts the numeric amount and uses RegionInfo to map the culture to its ISO currency code.
+        /// </summary>
+        private static Money ParseMoneyWithCulture(string moneyString, CultureInfo culture)
+        {
+            var region = new RegionInfo(culture.Name);
+            var currencySymbol = culture.NumberFormat.CurrencySymbol;
+            var numericStr = moneyString.Replace(currencySymbol, "").Trim();
+            var amount = decimal.Parse(numericStr, NumberStyles.Currency, culture);
+            return new Money(amount, region.ISOCurrencySymbol);
+        }
+
         private static MoneyResult ToMoneyResult(Money money)
         {
             return new MoneyResult(
@@ -453,9 +467,9 @@ namespace OutSystems.Extension.NodaMoney
             }
             catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
             {
-                // Ambiguous currency symbol (e.g., "$" matches USD, CAD, AUD, etc.)
-                // Fall back to en-US culture to resolve the ambiguity
-                parsed = Money.Parse(moneyString, CultureInfo.GetCultureInfo("en-US"));
+                // Money.Parse cannot resolve ambiguous currency symbols (e.g., "$" matches USD, CAD, AUD)
+                // even with a CultureInfo. Fall back to manual parsing using en-US culture.
+                parsed = ParseMoneyWithCulture(moneyString, CultureInfo.GetCultureInfo("en-US"));
             }
             moneyResult = ToMoneyResult(parsed);
         }
@@ -473,7 +487,15 @@ namespace OutSystems.Extension.NodaMoney
                 throw new ArgumentException("Culture name cannot be empty or whitespace.", nameof(cultureName));
 
             var culture = CultureInfo.GetCultureInfo(cultureName.Trim());
-            var parsed = Money.Parse(moneyString, culture);
+            Money parsed;
+            try
+            {
+                parsed = Money.Parse(moneyString, culture);
+            }
+            catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
+            {
+                parsed = ParseMoneyWithCulture(moneyString, culture);
+            }
             moneyResult = ToMoneyResult(parsed);
         }
 
