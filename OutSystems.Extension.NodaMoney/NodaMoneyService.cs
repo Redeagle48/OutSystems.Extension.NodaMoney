@@ -446,7 +446,17 @@ namespace OutSystems.Extension.NodaMoney
             if (string.IsNullOrWhiteSpace(moneyString))
                 throw new ArgumentException("Money string cannot be empty or whitespace.", nameof(moneyString));
 
-            var parsed = Money.Parse(moneyString);
+            Money parsed;
+            try
+            {
+                parsed = Money.Parse(moneyString);
+            }
+            catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
+            {
+                // Ambiguous currency symbol (e.g., "$" matches USD, CAD, AUD, etc.)
+                // Fall back to en-US culture to resolve the ambiguity
+                parsed = Money.Parse(moneyString, CultureInfo.GetCultureInfo("en-US"));
+            }
             moneyResult = ToMoneyResult(parsed);
         }
 
