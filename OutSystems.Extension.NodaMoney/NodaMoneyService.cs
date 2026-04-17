@@ -18,7 +18,31 @@ namespace OutSystems.Extension.NodaMoney
     /// </summary>
     public class NodaMoneyService : INodaMoney
     {
+        // Upper bound on |amount| for any money operation. 10^15 is ~10x global annual GDP;
+        // anything larger is either a bug upstream or an attempt to smuggle decimal.MaxValue
+        // into business logic. Rejecting early prevents silent misuse of 79-octillion-dollar values.
+        private const decimal MaxAmount = 1_000_000_000_000_000m;
+
+        // Cache of all ISO 4217 currencies. The NodaMoney registry is immutable for a
+        // given process, so the list is computed once per Lambda cold start and reused.
+        private static readonly Lazy<IReadOnlyList<CurrencyResult>> _allCurrenciesCache =
+            new(() => CurrencyInfo.GetAllCurrencies()
+                .Select(info => new CurrencyResult(info.Code, info.Symbol, info.EnglishName, info.DecimalDigits))
+                .ToList()
+                .AsReadOnly());
+
         #region Private Helpers
+
+        /// <summary>
+        /// Rejects amounts whose absolute value exceeds <see cref="MaxAmount"/>.
+        /// </summary>
+        private static void ValidateAmount(decimal amount, string paramName)
+        {
+            if (Math.Abs(amount) > MaxAmount)
+                throw new ArgumentOutOfRangeException(
+                    paramName,
+                    $"Amount must be within ±{MaxAmount:N0}.");
+        }
 
         /// <summary>
         /// Creates a NodaMoney.Money value from amount and currency code.
@@ -34,36 +58,57 @@ namespace OutSystems.Extension.NodaMoney
             if (string.IsNullOrWhiteSpace(currencyCode))
                 throw new ArgumentException("Currency code cannot be empty or whitespace.", nameof(currencyCode));
 
+            ValidateAmount(amount, nameof(amount));
+
             var currency = Currency.FromCode(currencyCode.Trim().ToUpperInvariant());
             return new Money(amount, currency);
         }
 
         /// <summary>
-        /// Converts a NodaMoney.Money instance to a MoneyResult structure.
-        /// Uses invariant culture for the Formatted field by default.
+        /// True when the string contains only digits, whitespace, sign, separators, and parentheses —
+        /// i.e. no currency symbol or ISO letters for NodaMoney to key on.
         /// </summary>
-        /// <param name="money">The NodaMoney.Money instance to convert.</param>
-        /// <returns>A MoneyResult with amount, currency code, and formatted string.</returns>
+        private static bool IsNumericOnly(string s)
+        {
+            foreach (var c in s)
+            {
+                if (!char.IsDigit(c) && !char.IsWhiteSpace(c) &&
+                    c != '.' && c != ',' && c != '-' && c != '+' &&
+                    c != '(' && c != ')')
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
         /// <summary>
         /// Parses a money string using a specific culture to resolve ambiguous currency symbols.
-        /// NodaMoney's Money.Parse ignores the culture for currency symbol resolution, so this method
-        /// manually extracts the numeric amount and uses RegionInfo to map the culture to its ISO currency code.
+        /// Relies on <see cref="NumberStyles.Currency"/> to strip the culture's currency symbol,
+        /// honour thousands/decimal separators, and accept parenthesised negatives.
+        /// The resulting ISO currency code is derived from the culture's <see cref="RegionInfo"/>.
         /// </summary>
         private static Money ParseMoneyWithCulture(string moneyString, CultureInfo culture)
         {
             var region = new RegionInfo(culture.Name);
-            var currencySymbol = culture.NumberFormat.CurrencySymbol;
-            var numericStr = moneyString.Replace(currencySymbol, "").Trim();
-            var amount = decimal.Parse(numericStr, NumberStyles.Currency, culture);
+            var amount = decimal.Parse(moneyString.Trim(), NumberStyles.Currency, culture);
             return new Money(amount, region.ISOCurrencySymbol);
         }
 
+        /// <summary>
+        /// Converts a NodaMoney.Money instance to a MoneyResult structure.
+        /// Uses NodaMoney's "L" (localised) format so the currency symbol matches the
+        /// currency's ISO code (e.g. "$100.50" for USD) rather than the invariant "¤" placeholder.
+        /// Also enforces <see cref="MaxAmount"/> so that arithmetic that overflows into
+        /// unreasonable magnitudes fails loudly rather than polluting downstream flows.
+        /// </summary>
         private static MoneyResult ToMoneyResult(Money money)
         {
+            ValidateAmount(money.Amount, "amount");
             return new MoneyResult(
                 money.Amount,
                 money.Currency.Code,
-                money.ToString("C", CultureInfo.InvariantCulture)
+                money.ToString("L")
             );
         }
 
@@ -86,7 +131,7 @@ namespace OutSystems.Extension.NodaMoney
 
         /// <summary>
         /// Validates that a format string is in the allowed whitelist.
-        /// Permits standard format specifiers (C, N, F, G, L, R) optionally followed by
+        /// Permits standard format specifiers (C, N, F, G) optionally followed by
         /// a single precision digit (0-9).
         /// </summary>
         private static bool IsAllowedFormat(string format)
@@ -95,7 +140,7 @@ namespace OutSystems.Extension.NodaMoney
                 return false;
 
             char specifier = char.ToUpperInvariant(format[0]);
-            if (specifier is not ('C' or 'N' or 'F' or 'G' or 'L' or 'R'))
+            if (specifier is not ('C' or 'N' or 'F' or 'G'))
                 return false;
 
             if (format.Length == 2 && !char.IsAsciiDigit(format[1]))
@@ -321,18 +366,7 @@ namespace OutSystems.Extension.NodaMoney
         /// <inheritdoc />
         public void CurrencyGetAll(out List<CurrencyResult> currencies)
         {
-            currencies = new List<CurrencyResult>();
-
-            var allCurrencies = CurrencyInfo.GetAllCurrencies();
-            foreach (var info in allCurrencies)
-            {
-                currencies.Add(new CurrencyResult(
-                    info.Code,
-                    info.Symbol,
-                    info.EnglishName,
-                    info.DecimalDigits
-                ));
-            }
+            currencies = new List<CurrencyResult>(_allCurrenciesCache.Value);
         }
 
         /// <inheritdoc />
@@ -430,7 +464,7 @@ namespace OutSystems.Extension.NodaMoney
             var trimmed = format.Trim();
             if (!IsAllowedFormat(trimmed))
                 throw new ArgumentException(
-                    "Format must be one of: C, N, F, G, L, R (optionally followed by a precision digit 0-9).",
+                    "Format must be one of: C, N, F, G (optionally followed by a precision digit 0-9).",
                     nameof(format));
 
             var money = CreateMoney(amount, currencyCode);
@@ -467,9 +501,21 @@ namespace OutSystems.Extension.NodaMoney
             }
             catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
             {
-                // Money.Parse cannot resolve ambiguous currency symbols (e.g., "$" matches USD, CAD, AUD)
-                // even with a CultureInfo. Fall back to manual parsing using en-US culture.
-                parsed = ParseMoneyWithCulture(moneyString, CultureInfo.GetCultureInfo("en-US"));
+                // "$" alone is ambiguous (USD, CAD, AUD, ...). Default to USD only for a bare "$"
+                // with no letter prefix — rules out "A$", "CA$", "HK$", "S$", "NZ$", etc., which
+                // would silently collapse to USD in the previous implementation.
+                var trimmed = moneyString.TrimStart();
+                if (trimmed.StartsWith('$') && !moneyString.Any(char.IsLetter))
+                {
+                    parsed = ParseMoneyWithCulture(moneyString, CultureInfo.GetCultureInfo("en-US"));
+                }
+                else
+                {
+                    throw new FormatException(
+                        $"Cannot determine currency from '{moneyString}': the symbol is ambiguous across multiple currencies. " +
+                        "Use MoneyParseWithCulture with an explicit culture name (e.g. \"en-AU\", \"en-CA\") to disambiguate.",
+                        ex);
+                }
             }
             moneyResult = ToMoneyResult(parsed);
         }
@@ -488,13 +534,24 @@ namespace OutSystems.Extension.NodaMoney
 
             var culture = CultureInfo.GetCultureInfo(cultureName.Trim());
             Money parsed;
-            try
-            {
-                parsed = Money.Parse(moneyString, culture);
-            }
-            catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
+
+            // When the string has no symbol or ISO letters, NodaMoney's Money.Parse ignores the
+            // supplied culture for currency resolution and falls back to a process default (USD).
+            // Honour the caller's culture by deriving the currency from its RegionInfo directly.
+            if (IsNumericOnly(moneyString))
             {
                 parsed = ParseMoneyWithCulture(moneyString, culture);
+            }
+            else
+            {
+                try
+                {
+                    parsed = Money.Parse(moneyString, culture);
+                }
+                catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
+                {
+                    parsed = ParseMoneyWithCulture(moneyString, culture);
+                }
             }
             moneyResult = ToMoneyResult(parsed);
         }

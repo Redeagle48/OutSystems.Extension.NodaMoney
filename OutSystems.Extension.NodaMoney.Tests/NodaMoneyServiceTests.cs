@@ -1008,6 +1008,44 @@ namespace OutSystems.Extension.NodaMoney.Tests
                 _sut.MoneyParseWithCulture("$100", null!, out _));
         }
 
+        [Test]
+        public void MoneyParseWithCulture_NumericOnlyDeDe_ReturnsEur()
+        {
+            // "1.234,56" has no currency symbol or ISO letters. Money.Parse would default to USD
+            // regardless of culture. With the culture-honouring fix, the region currency (EUR) is used.
+            _sut.MoneyParseWithCulture("1.234,56", "de-DE", out var result);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.Amount, Is.EqualTo(1234.56m));
+                Assert.That(result.CurrencyCode, Is.EqualTo("EUR"));
+            });
+        }
+
+        [Test]
+        public void MoneyParseWithCulture_NumericOnlyJaJp_ReturnsJpy()
+        {
+            _sut.MoneyParseWithCulture("100", "ja-JP", out var result);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.Amount, Is.EqualTo(100m));
+                Assert.That(result.CurrencyCode, Is.EqualTo("JPY"));
+            });
+        }
+
+        [Test]
+        public void MoneyParseWithCulture_NumericOnlyEnGb_ReturnsGbp()
+        {
+            _sut.MoneyParseWithCulture("1,234.56", "en-GB", out var result);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(result.Amount, Is.EqualTo(1234.56m));
+                Assert.That(result.CurrencyCode, Is.EqualTo("GBP"));
+            });
+        }
+
         #endregion
 
         #region MoneyRound Tests
@@ -1084,6 +1122,38 @@ namespace OutSystems.Extension.NodaMoney.Tests
             // Very large amount should still work
             Assert.DoesNotThrow(() =>
                 _sut.MoneyCreate(999999999999m, "USD", out _));
+        }
+
+        [Test]
+        public void MoneyCreate_AmountAboveCap_ThrowsArgumentOutOfRange()
+        {
+            // MaxAmount is 10^15; anything above should be rejected.
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                _sut.MoneyCreate(1_000_000_000_000_001m, "USD", out _));
+        }
+
+        [Test]
+        public void MoneyCreate_AmountBelowNegativeCap_ThrowsArgumentOutOfRange()
+        {
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                _sut.MoneyCreate(-1_000_000_000_000_001m, "USD", out _));
+        }
+
+        [Test]
+        public void MoneyParse_DecimalMaxValue_ThrowsArgumentOutOfRange()
+        {
+            // The amount bound applies post-parse: a 79-octillion-dollar string must not
+            // leak into downstream flows.
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                _sut.MoneyParse("$79228162514264337593543950335", out _));
+        }
+
+        [Test]
+        public void MoneyMultiply_OverflowsCap_ThrowsArgumentOutOfRange()
+        {
+            // 9e14 * 10 = 9e15, which exceeds MaxAmount (1e15) — caught by output-side validation.
+            Assert.Throws<ArgumentOutOfRangeException>(() =>
+                _sut.MoneyMultiply(900_000_000_000_000m, "USD", 10m, out _));
         }
 
         [Test]
