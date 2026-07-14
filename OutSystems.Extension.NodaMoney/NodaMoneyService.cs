@@ -495,21 +495,24 @@ namespace OutSystems.Extension.NodaMoney
                 throw new ArgumentException("Money string cannot be empty or whitespace.", nameof(moneyString));
 
             Money parsed;
-            try
+
+            // "$" alone is ambiguous (USD, CAD, AUD, NZD, ...). Default a bare "$" — no letter
+            // prefix, which rules out "A$", "CA$", "HK$", "S$", "NZ$", etc. — to USD. This is
+            // resolved up front rather than relying on Money.Parse throwing a "multiple currencies"
+            // FormatException, because some runtimes resolve a bare "$" to a non-USD currency
+            // (e.g. NZD) without throwing.
+            var trimmed = moneyString.TrimStart();
+            if (trimmed.StartsWith('$') && !moneyString.Any(char.IsLetter))
             {
-                parsed = Money.Parse(moneyString);
+                parsed = ParseMoneyWithCulture(moneyString, CultureInfo.GetCultureInfo("en-US"));
             }
-            catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
+            else
             {
-                // "$" alone is ambiguous (USD, CAD, AUD, ...). Default to USD only for a bare "$"
-                // with no letter prefix — rules out "A$", "CA$", "HK$", "S$", "NZ$", etc., which
-                // would silently collapse to USD in the previous implementation.
-                var trimmed = moneyString.TrimStart();
-                if (trimmed.StartsWith('$') && !moneyString.Any(char.IsLetter))
+                try
                 {
-                    parsed = ParseMoneyWithCulture(moneyString, CultureInfo.GetCultureInfo("en-US"));
+                    parsed = Money.Parse(moneyString);
                 }
-                else
+                catch (FormatException ex) when (ex.Message.Contains("multiple currencies"))
                 {
                     throw new FormatException(
                         $"Cannot determine currency from '{moneyString}': the symbol is ambiguous across multiple currencies. " +
@@ -537,8 +540,12 @@ namespace OutSystems.Extension.NodaMoney
 
             // When the string has no symbol or ISO letters, NodaMoney's Money.Parse ignores the
             // supplied culture for currency resolution and falls back to a process default (USD).
-            // Honour the caller's culture by deriving the currency from its RegionInfo directly.
-            if (IsNumericOnly(moneyString))
+            // A bare "$" is likewise ambiguous and, on some runtimes, resolves to a non-USD
+            // currency (e.g. NZD) without throwing. In both cases honour the caller's culture by
+            // deriving the currency from its RegionInfo directly.
+            var trimmed = moneyString.TrimStart();
+            var bareDollar = trimmed.StartsWith('$') && !moneyString.Any(char.IsLetter);
+            if (IsNumericOnly(moneyString) || bareDollar)
             {
                 parsed = ParseMoneyWithCulture(moneyString, culture);
             }
